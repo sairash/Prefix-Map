@@ -11,7 +11,7 @@ func TestMain(t *testing.T) {
 	getting_value := []string{"h", "he", "he", "hello"}
 
 	for _, v := range values {
-		new_node.Insert(v, v)
+		new_node.Insert(v, false, 0, v)
 	}
 
 	value := new_node.SearchThrough("h")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 )
 
 type Node struct {
@@ -27,7 +28,14 @@ func NewNode(char string) *Node {
 	return node
 }
 
-func (t *Trie) Insert(key string, values ...string) error {
+func (node *Node) setTTL(ttl time.Duration) {
+	go func() {
+		<-time.After(ttl)
+		node.Values = nil
+	}()
+}
+
+func (t *Trie) Insert(key string, has_ttl bool, time_to_live int, values ...string) error {
 	current := t.RootNode
 	for i := 0; i < len(key); i++ {
 		index := key[i] - 'a'
@@ -38,55 +46,57 @@ func (t *Trie) Insert(key string, values ...string) error {
 	}
 	current.AutoDelete = true
 	current.Values = append(current.Values, values...)
+	if has_ttl {
+		current.setTTL(time.Duration(time_to_live) * time.Second)
+	}
 	return nil
 }
 
-func AggrigateAndReturnEveryChildrenValues(current **Node) []string {
+func (current *Node) AggrigateAndReturnEveryChildrenValues() []string {
 	return_string := []string{}
-	current_node := *current
-	if current_node == nil {
+	if current == nil {
 		return []string{}
 	} else {
-		return_string = append(return_string, current_node.Values...)
+		return_string = append(return_string, current.Values...)
 	}
-	for _, val := range current_node.Children {
+	for _, val := range current.Children {
 		if val != nil {
-			return_string = append(return_string, AggrigateAndReturnEveryChildrenValues(&val)...)
+			return_string = append(return_string, val.AggrigateAndReturnEveryChildrenValues()...)
 		}
 	}
 
-	if current_node.AutoDelete {
-		*current = nil
+	if current.AutoDelete {
+		current.Values = nil
 	}
 	return return_string
 }
 
 func (t *Trie) SearchThrough(key string) []string {
-	current_pointer := &t.RootNode
-	current := *current_pointer
+	current := t.RootNode
 	for i := 0; i < len(key); i++ {
 		index := key[i] - 'a'
 		if current == nil || current.Children[index] == nil {
 			return []string{}
 		}
 
-		current_pointer = &current.Children[index]
-		current = *current_pointer
+		current = current.Children[index]
 	}
 
-	return AggrigateAndReturnEveryChildrenValues(current_pointer)
+	return current.AggrigateAndReturnEveryChildrenValues()
 }
 
 func main() {
 	new_node := NewTrie()
 
-	new_node.Insert("hello", "hello")
-	new_node.Insert("hel", "hel")
-	new_node.Insert("hel", "hel")
-	new_node.Insert("he", "he")
-	new_node.Insert("h", "h")
-	new_node.Insert("se", "se")
+	new_node.Insert("hel", true, 2, "hel")
+	new_node.Insert("hello", true, 2, "hello")
+	new_node.Insert("hel", false, 2, "hel")
+	new_node.Insert("he", true, 2, "he")
+	new_node.Insert("h", true, 2, "h")
+	new_node.Insert("se", true, 2, "se")
 
 	fmt.Println(new_node.SearchThrough("h"))
 	fmt.Println(new_node.SearchThrough("se"))
+	fmt.Println(new_node.SearchThrough("h"))
+	time.Sleep(3 * time.Second)
 }
