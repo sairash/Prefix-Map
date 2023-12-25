@@ -52,23 +52,23 @@ func (t *Trie) Insert(key string, has_ttl bool, time_to_live int, values ...stri
 	return nil
 }
 
-func (current *Node) AggrigateAndReturnEveryChildrenValues() []string {
-	return_string := []string{}
-	if current == nil {
-		return []string{}
-	} else {
-		return_string = append(return_string, current.Values...)
-	}
-	for _, val := range current.Children {
-		if val != nil {
-			return_string = append(return_string, val.AggrigateAndReturnEveryChildrenValues()...)
+func (current *Node) traverse() []string {
+	var result []string
+	if current != nil {
+		result = append(result, current.Values...)
+
+		for _, child := range current.Children {
+			if child != nil {
+				result = append(result, child.traverse()...)
+			}
+		}
+
+		if current.AutoDelete {
+			current.Values = nil
 		}
 	}
 
-	if current.AutoDelete {
-		current.Values = nil
-	}
-	return return_string
+	return result
 }
 
 func (t *Trie) SearchThrough(key string) []string {
@@ -82,7 +82,7 @@ func (t *Trie) SearchThrough(key string) []string {
 		current = current.Children[index]
 	}
 
-	return current.AggrigateAndReturnEveryChildrenValues()
+	return current.traverse()
 }
 
 func main() {
