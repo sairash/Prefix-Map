@@ -5,9 +5,14 @@ import (
 	"time"
 )
 
+type NodeValues struct {
+	Value string
+	Done  chan struct{}
+}
+
 type Node struct {
 	Char       string
-	Values     []string
+	Values     []**NodeValues
 	AutoDelete bool
 	Children   [27]*Node
 }
@@ -28,11 +33,21 @@ func NewNode(char string) *Node {
 	return node
 }
 
-func (node *Node) setTTL(ttl time.Duration) {
-	go func() {
-		<-time.After(ttl)
-		node.Values = nil
-	}()
+func NewNodeValue(value string, has_ttl bool, ttl time.Duration) **NodeValues {
+	nv := &NodeValues{Value: value}
+	nv.Done = make(chan struct{})
+	if has_ttl {
+		go func() {
+			select {
+			case <-time.After(ttl):
+				close(nv.Done)
+				nv = nil
+			case <-nv.Done:
+				nv = nil
+			}
+		}()
+	}
+	return &nv
 }
 
 func (t *Trie) Insert(key string, has_ttl bool, time_to_live int, values ...string) error {
@@ -45,44 +60,65 @@ func (t *Trie) Insert(key string, has_ttl bool, time_to_live int, values ...stri
 		current = current.Children[index]
 	}
 	current.AutoDelete = true
-	current.Values = append(current.Values, values...)
-	if has_ttl {
-		current.setTTL(time.Duration(time_to_live) * time.Second)
+
+	for _, v := range values {
+		nv := NewNodeValue(v, has_ttl, time.Duration(time_to_live)*time.Second)
+		current.Values = append(current.Values, nv)
 	}
+
 	return nil
 }
 
-func (current *Node) traverse() []string {
-	var result []string
-	if current != nil {
-		result = append(result, current.Values...)
+func delete(current **Node) {
 
-		for _, child := range current.Children {
-			if child != nil {
-				result = append(result, child.traverse()...)
+}
+
+func traverse(current **Node) []string {
+	var result []string
+	if (*current) != nil {
+		auto_delete := (*current).AutoDelete
+
+		for _, v := range (*current).Values {
+			val := (*v)
+			if val != nil {
+
+				result = append(result, val.Value)
+
+				if auto_delete {
+					select {
+					case <-val.Done:
+					default:
+						close(val.Done)
+					}
+				}
 			}
 		}
 
-		if current.AutoDelete {
-			current.Values = nil
+		for _, child := range (*current).Children {
+			if child != nil {
+				result = append(result, traverse(&child)...)
+			}
+		}
+
+		if auto_delete {
+			(*current).Values = nil
+			delete(current)
 		}
 	}
-
 	return result
 }
 
 func (t *Trie) SearchThrough(key string) []string {
-	current := t.RootNode
+	current_pointer := &t.RootNode
 	for i := 0; i < len(key); i++ {
 		index := key[i] - 'a'
-		if current == nil || current.Children[index] == nil {
+		if (*current_pointer) == nil || (*current_pointer).Children[index] == nil {
 			return []string{}
 		}
-
-		current = current.Children[index]
+		current_pointer = &(*current_pointer).Children[index]
 	}
 
-	return current.traverse()
+	return traverse(current_pointer)
 }
 
 func main() {
@@ -95,8 +131,8 @@ func main() {
 	new_node.Insert("h", true, 2, "h")
 	new_node.Insert("se", true, 2, "se")
 
+	time.Sleep(3 * time.Second)
 	fmt.Println(new_node.SearchThrough("h"))
 	fmt.Println(new_node.SearchThrough("se"))
 	fmt.Println(new_node.SearchThrough("h"))
-	time.Sleep(3 * time.Second)
 }
