@@ -62,6 +62,15 @@ func keysegmentfunc(key string, init int) (ret string, next int) {
 	return key[init : init+end+1], init + end + 2
 }
 
+func (s *SegNode[v]) GenerateNotUsedUUid(length int) string {
+	uuid := GenerateRandomString(length)
+	if _, ok := s.values.Get(uuid); !ok {
+		return uuid
+	} else {
+		return s.GenerateNotUsedUUid(length)
+	}
+}
+
 func (parent *SegNode[v]) NewSegVal(key string, ttl time.Duration, value v, child *SegNode[v], uuid string) *SegValue[v] {
 	seg_val := &SegValue[v]{
 		value: value,
@@ -124,7 +133,7 @@ func (s *Segmap[v]) Put(key string, ttl time.Duration, value ...v) int {
 	}
 
 	for _, val := range value {
-		uuid := GenerateRandomString(5)
+		uuid := segnode.GenerateNotUsedUUid(5)
 		segnode.values.Put(uuid, parent.NewSegVal(last_key, ttl, val, segnode, uuid))
 	}
 	return segnode.values.Count()
