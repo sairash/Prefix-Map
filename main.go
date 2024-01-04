@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,7 +19,7 @@ type SegValue[v comparable] struct {
 
 type SegNode[v comparable] struct {
 	mu       sync.RWMutex
-	values   []*SegValue[v]
+	values   *swiss.Map[string, *SegValue[v]]
 	Children *swiss.Map[string, *SegNode[v]]
 }
 
@@ -29,7 +30,24 @@ type Segmap[v comparable] struct {
 
 type SegMapGetValue[v comparable] struct {
 	Value v
-	Index int
+	Uuid  string
+}
+
+const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+func GenerateRandomString(length int) string {
+
+	randomString := make([]byte, length)
+	randomBytes := make([]byte, length+(length/4))
+
+	for i, _ := range randomString {
+		if _, err := rand.Read(randomBytes); err != nil {
+			panic(err)
+		}
+		randomString[i] = charset[int(randomBytes[i])%len(charset)]
+	}
+
+	return string(randomString)
 }
 
 func keysegmentfunc(key string, init int) (ret string, next int) {
@@ -44,7 +62,7 @@ func keysegmentfunc(key string, init int) (ret string, next int) {
 	return key[init : init+end+1], init + end + 2
 }
 
-func (parent *SegNode[v]) NewSegVal(key string, ttl time.Duration, value v, child *SegNode[v], length int) *SegValue[v] {
+func (parent *SegNode[v]) NewSegVal(key string, ttl time.Duration, value v, child *SegNode[v], uuid string) *SegValue[v] {
 	seg_val := &SegValue[v]{
 		value: value,
 		done:  make(chan struct{}),
@@ -56,11 +74,9 @@ func (parent *SegNode[v]) NewSegVal(key string, ttl time.Duration, value v, chil
 				close(seg_val.done)
 			case <-seg_val.done:
 			}
-			fmt.Println("Here")
 			child.mu.Lock()
-			fmt.Println(child.values, length, key, child.values[:length])
-			child.values = append(child.values[:length], child.values[length+1:]...)
-			if len(child.values) == 0 {
+			child.values.Delete(uuid)
+			if child.values.Count() == 0 {
 				parent.Children.Delete(key)
 			}
 			child.mu.Unlock()
@@ -72,6 +88,7 @@ func (parent *SegNode[v]) NewSegVal(key string, ttl time.Duration, value v, chil
 
 func NewSegNode[v comparable]() *SegNode[v] {
 	return &SegNode[v]{
+		values:   swiss.NewMap[string, *SegValue[v]](42),
 		Children: swiss.NewMap[string, *SegNode[v]](42),
 	}
 }
@@ -107,9 +124,10 @@ func (s *Segmap[v]) Put(key string, ttl time.Duration, value ...v) int {
 	}
 
 	for _, val := range value {
-		segnode.values = append(segnode.values, parent.NewSegVal(last_key, ttl, val, segnode, len(segnode.values)))
+		uuid := GenerateRandomString(5)
+		segnode.values.Put(uuid, parent.NewSegVal(last_key, ttl, val, segnode, uuid))
 	}
-	return len(segnode.values)
+	return segnode.values.Count()
 }
 
 func (s *Segmap[v]) Get(key string) []SegMapGetValue[v] {
@@ -127,12 +145,13 @@ func (s *Segmap[v]) Get(key string) []SegMapGetValue[v] {
 	segnode.mu.RLock()
 	defer segnode.mu.RUnlock()
 	segval_ret := []SegMapGetValue[v]{}
-	for k, val := range segnode.values {
+	segnode.values.Iter(func(k string, val *SegValue[v]) (stop bool) {
 		segval_ret = append(segval_ret, SegMapGetValue[v]{
 			Value: val.value,
-			Index: k,
+			Uuid:  k,
 		})
-	}
+		return false
+	})
 	return segval_ret
 }
 
@@ -149,24 +168,25 @@ func (s *Segmap[v]) Delete(key string, value v, index int) bool {
 		segnode = child
 	}
 
-	if len(segnode.values) >= index {
-		segnode.mu.RLock()
-		if segnode.values[index].value == value {
-			close(segnode.values[index].done)
+	val, ok := segnode.values.Get(key)
+
+	if ok {
+		if val.value == value {
+			close(val.done)
 		}
-		segnode.mu.RUnlock()
 	}
-	return false
+
+	return ok
 }
 
 func (s *SegNode[v]) walk() []v {
 	if s != nil {
 		var result []v
 		s.mu.RLock()
-		for _, val := range s.values {
-
-			result = append(result, (*val).value)
-		}
+		s.values.Iter(func(k string, val *SegValue[v]) (stop bool) {
+			result = append(result, val.value)
+			return false
+		})
 		s.mu.RUnlock()
 		s.Children.Iter(func(k string, seg *SegNode[v]) (stop bool) {
 			seg.mu.RLock()
@@ -205,6 +225,7 @@ func main() {
 	fmt.Println(segmap.Get("tuutf e f e"))
 	segmap.Delete("tuutf e f e", "first val", 0)
 	time.Sleep(time.Duration(3) * time.Second)
+	segmap.Put("tuutf e f t", time.Duration(2)*time.Second, "last val")
 	fmt.Println(segmap.Get("tuutf e f e"))
 	fmt.Println(segmap.Transverse("tuutf e f"))
 }
