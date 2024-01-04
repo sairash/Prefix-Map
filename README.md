@@ -1,5 +1,5 @@
-## Segmap (Segmented Maps)
-# Prefix Map Golang
+# Segmap (Segmented Maps)
+## Prefix Map Golang
 
 <pre>
 - Store
