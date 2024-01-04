@@ -12,8 +12,23 @@ import (
 
 type Segmenter func(k string, init int) (ret string, next int)
 
+type LastUpdatedMessage[v comparable] struct {
+	Value SegData[v]
+	Uuid  string
+}
+
+type LastUpdated[v comparable] struct {
+	mu    sync.RWMutex
+	Value map[string][]LastUpdatedMessage[v]
+}
+
+type SegData[v comparable] struct {
+	Data v
+	At   int64
+}
+
 type SegValue[v comparable] struct {
-	value v
+	value SegData[v]
 	done  chan struct{}
 }
 
@@ -24,12 +39,13 @@ type SegNode[v comparable] struct {
 }
 
 type Segmap[v comparable] struct {
-	Node      *SegNode[v]
-	Segmenter Segmenter
+	Node         *SegNode[v]
+	Segmenter    Segmenter
+	last_updated LastUpdated[v]
 }
 
 type SegMapGetValue[v comparable] struct {
-	Value v
+	Value SegData[v]
 	Uuid  string
 }
 
@@ -71,24 +87,59 @@ func (s *SegNode[v]) GenerateNotUsedUUid(length int) string {
 	}
 }
 
-func (parent *SegNode[v]) NewSegVal(key string, ttl time.Duration, value v, child *SegNode[v], uuid string) *SegValue[v] {
+func (s *Segmap[v]) CallBack(cb func(map[string][]LastUpdatedMessage[v]), callback_on time.Duration) {
+	ticker := time.NewTicker(callback_on)
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				s.last_updated.mu.Lock()
+				cb(s.last_updated.Value)
+				if len(s.last_updated.Value) > 0 {
+					s.last_updated.Value = make(map[string][]LastUpdatedMessage[v])
+				}
+				s.last_updated.mu.Unlock()
+			}
+		}
+	}()
+}
+
+func (s *Segmap[v]) delete(full_key, segmented_key string, ttl time.Duration, value v, parent, child *SegNode[v], uuid string) {
+	child.mu.Lock()
+	child.values.Delete(uuid)
+	if child.values.Count() == 0 {
+		parent.Children.Delete(segmented_key)
+	}
+	child.mu.Unlock()
+	s.last_updated.mu.Lock()
+	s.last_updated.Value[full_key] = append(s.last_updated.Value[full_key], LastUpdatedMessage[v]{
+		Value: SegData[v]{
+			Data: value,
+			At:   time.Now().Unix(),
+		},
+		Uuid: uuid,
+	})
+	s.last_updated.mu.Unlock()
+}
+
+func (s *Segmap[v]) NewSegVal(full_key, segmented_key string, ttl time.Duration, value v, parent, child *SegNode[v], uuid string) *SegValue[v] {
 	seg_val := &SegValue[v]{
-		value: value,
-		done:  make(chan struct{}),
+		value: SegData[v]{
+			Data: value,
+			At:   time.Now().Unix(),
+		},
+		done: make(chan struct{}),
 	}
 	if ttl > 0 {
 		go func() {
 			select {
 			case <-time.After(ttl):
 				close(seg_val.done)
+				s.delete(full_key, segmented_key, ttl, value, parent, child, uuid)
 			case <-seg_val.done:
+				s.delete(full_key, segmented_key, ttl, value, parent, child, uuid)
 			}
-			child.mu.Lock()
-			child.values.Delete(uuid)
-			if child.values.Count() == 0 {
-				parent.Children.Delete(key)
-			}
-			child.mu.Unlock()
 		}()
 	}
 
@@ -103,7 +154,11 @@ func NewSegNode[v comparable]() *SegNode[v] {
 }
 
 func NewSegmap[v comparable](segmenter Segmenter) *Segmap[v] {
-	s := Segmap[v]{}
+	s := Segmap[v]{
+		last_updated: LastUpdated[v]{
+			Value: make(map[string][]LastUpdatedMessage[v]),
+		},
+	}
 	s.Node = NewSegNode[v]()
 	if segmenter == nil {
 		s.Segmenter = keysegmentfunc
@@ -117,11 +172,11 @@ func NewSegmap[v comparable](segmenter Segmenter) *Segmap[v] {
 func (s *Segmap[v]) Put(key string, ttl time.Duration, value ...v) int {
 	var parent *SegNode[v]
 	segnode := s.Node
-	last_key := ""
+	segmented_key := ""
 
 	for seg, i := s.Segmenter(key, 0); seg != ""; seg, i = s.Segmenter(key, i) {
 		parent = segnode
-		last_key = seg
+		segmented_key = seg
 		segnode.mu.Lock()
 		child, ok := segnode.Children.Get(seg)
 		if !ok {
@@ -134,7 +189,7 @@ func (s *Segmap[v]) Put(key string, ttl time.Duration, value ...v) int {
 
 	for _, val := range value {
 		uuid := segnode.GenerateNotUsedUUid(5)
-		segnode.values.Put(uuid, parent.NewSegVal(last_key, ttl, val, segnode, uuid))
+		segnode.values.Put(uuid, s.NewSegVal(key, segmented_key, ttl, val, parent, segnode, uuid))
 	}
 	return segnode.values.Count()
 }
@@ -164,7 +219,7 @@ func (s *Segmap[v]) Get(key string) []SegMapGetValue[v] {
 	return segval_ret
 }
 
-func (s *Segmap[v]) Delete(key string, value v, index int) bool {
+func (s *Segmap[v]) Delete(key, uuid string, value v) bool {
 	segnode := s.Node
 	for seg, i := s.Segmenter(key, 0); seg != ""; seg, i = s.Segmenter(key, i) {
 		segnode.mu.RLock()
@@ -177,10 +232,10 @@ func (s *Segmap[v]) Delete(key string, value v, index int) bool {
 		segnode = child
 	}
 
-	val, ok := segnode.values.Get(key)
+	val, ok := segnode.values.Get(uuid)
 
 	if ok {
-		if val.value == value {
+		if val.value.Data == value {
 			close(val.done)
 		}
 	}
@@ -193,7 +248,7 @@ func (s *SegNode[v]) walk() []v {
 		var result []v
 		s.mu.RLock()
 		s.values.Iter(func(k string, val *SegValue[v]) (stop bool) {
-			result = append(result, val.value)
+			result = append(result, val.value.Data)
 			return false
 		})
 		s.mu.RUnlock()
@@ -226,15 +281,23 @@ func (s *Segmap[v]) Transverse(key string) []v {
 
 func main() {
 	segmap := NewSegmap[string](nil)
-	segmap.Put("tuutf e f e", time.Duration(2)*time.Second, "first val")
-	segmap.Put("tuutf e f e", time.Duration(2)*time.Second, "second val")
-	segmap.Put("tuutf e f x", time.Duration(0), "first")
-	segmap.Put("tuutf e f x", time.Duration(2)*time.Second, "second")
-	segmap.Put("tuutf e f t", time.Duration(2)*time.Second, "third")
-	fmt.Println(segmap.Get("tuutf e f e"))
-	segmap.Delete("tuutf e f e", "first val", 0)
-	time.Sleep(time.Duration(3) * time.Second)
-	segmap.Put("tuutf e f t", time.Duration(2)*time.Second, "last val")
+	segmap.CallBack(func(m map[string][]LastUpdatedMessage[string]) {
+		fmt.Println("Last Deleted: ", m)
+	}, time.Duration(2)*time.Second)
+
+	segmap.Put("tuutf e f e", time.Duration(2)*time.Second, "1")
+	segmap.Put("tuutf e f e", time.Duration(2)*time.Second, "2")
+	segmap.Put("tuutf e f x", time.Duration(3)*time.Second, "3")
+	segmap.Put("tuutf e f x", time.Duration(2)*time.Second, "4")
+	segmap.Put("tuutf e f t", time.Duration(0)*time.Second, "5")
+
+	val := segmap.Get("tuutf e f x")
+	fmt.Println(val[0])
+	fmt.Println(segmap.Delete("tuutf e f x", val[0].Uuid, val[0].Value.Data))
+
+	fmt.Println(val)
+	time.Sleep(time.Duration(5) * time.Second)
+	segmap.Put("tuutf e f t", time.Duration(2)*time.Second, "6")
 	fmt.Println(segmap.Get("tuutf e f e"))
 	fmt.Println(segmap.Transverse("tuutf e f"))
 }
