@@ -4,26 +4,46 @@ import (
 	"testing"
 )
 
-func TestMain(t *testing.T) {
-	new_node := NewTrie()
+// var segmap = NewSegmap[string](nil)
+// var prefixMap = prefixmap.New()
+var newSegmentedMap = MySegmentedMap[string]()
 
-	values := []string{"hello", "he", "he", "h"}
-	getting_value := []string{"h", "he", "he", "hello"}
+// var m = swiss.NewMap[string, int](42)
 
-	for _, v := range values {
-		new_node.Insert(v, false, 0, v)
+// func TestMain(t *testing.T) {
+// 	segmap := NewSegmap[string](nil)
+// 	segmap.Put("tuutf e f e", time.Duration(2)*time.Second, "1")
+// }
+
+func BenchmarkPut(b *testing.B) {
+
+	for i := 0; i < b.N; i++ {
+		// m.Put("foo", 1)
+		// segmap.Put("tuutf e f e", time.Duration(0), "1")
+		newSegmentedMap.Put("tuutf e f e", "1")
+		// prefixMap.Insert("tuutfefe", "1")
 	}
+}
 
-	value := new_node.SearchThrough("h")
-	new_value := new_node.SearchThrough("h")
-
-	for k, v := range value {
-		if v != getting_value[k] {
-			t.Errorf("Unexpected value got expected: %v, got: %v", getting_value[k], v)
-		}
+func BenchmarkGet(b *testing.B) {
+	// prefixMap.Insert("tuutfefe", "1")
+	newSegmentedMap.Put("tuutf e f e", "1")
+	// segmap.Put("tuutf e f e", time.Duration(0), "1")
+	for i := 0; i < b.N; i++ {
+		// m.Put("foo", 1)
+		// segmap.Get("tuutf e f e")
+		// prefixMap.Get("tuutfefe")
+		newSegmentedMap.Get("tuutf e f e")
 	}
+}
 
-	if len(new_value) != 0 {
-		t.Errorf("Value mismatch, the expected value was [], got %v", new_value)
+func BenchmarkTra(b *testing.B) {
+	// prefixMap.Insert("tuutfefe", "1")
+	// prefixMap.Insert("tuutfefx", "1")
+	newSegmentedMap.Put("tuutf e f e", "1")
+	newSegmentedMap.Put("tuutf e f x", "2")
+	for i := 0; i < b.N; i++ {
+		// prefixMap.GetByPrefix("tuutfefe")
+		newSegmentedMap.Transverse("tuutf e f")
 	}
 }
