@@ -27,7 +27,7 @@ func MySegmentedMap[v comparable]() *SegmentedMap[v] {
 func (s *SegmentedMap[v]) Put(key string, value v) {
 	parent := s.Node
 	var child *SegmentedNode[v]
-	for seg, i := keysegmentfunc(key, 0); seg != ""; seg, i = keysegmentfunc(key, i) {
+	for seg, i := spacekeysegmentfunc(key, 0); seg != ""; seg, i = spacekeysegmentfunc(key, i) {
 		child = parent.Children[seg]
 		if child == nil {
 			child = &SegmentedNode[v]{
@@ -46,7 +46,7 @@ func (s *SegmentedMap[v]) Put(key string, value v) {
 
 func (s *SegmentedMap[v]) Get(key string) map[int]v {
 	node := s.Node
-	for seg, i := keysegmentfunc(key, 0); seg != ""; seg, i = keysegmentfunc(key, i) {
+	for seg, i := spacekeysegmentfunc(key, 0); seg != ""; seg, i = spacekeysegmentfunc(key, i) {
 		node = node.Children[seg]
 		if node == nil {
 			return nil
@@ -71,7 +71,7 @@ func (s *SegmentedNode[v]) walk() []v {
 
 func (s *SegmentedMap[v]) Transverse(key string) []v {
 	node := s.Node
-	for seg, i := keysegmentfunc(key, 0); seg != ""; seg, i = keysegmentfunc(key, i) {
+	for seg, i := spacekeysegmentfunc(key, 0); seg != ""; seg, i = spacekeysegmentfunc(key, i) {
 		node = node.Children[seg]
 		if node == nil {
 			return nil
