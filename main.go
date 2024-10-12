@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,35 +23,30 @@ type LastUpdated[v comparable] struct {
 	Value map[string][]LastUpdatedMessage[v]
 }
 
-type SegValue[v comparable] struct {
-	ttl  *segTtlValue[v]
-	done chan struct{}
-}
-
 type SegNode[v comparable] struct {
 	mu       sync.RWMutex
-	values   *swiss.Map[string, *SegValue[v]]
+	values   *swiss.Map[string, *SegValueData[v]]
 	Children *swiss.Map[string, *SegNode[v]]
 }
 
-type segTtlValue[v comparable] struct {
-	till          time.Time
-	value         v
-	segmented_key string
-	key           string
-	uuid          string
+type SegValueData[v comparable] struct {
+	till         time.Time
+	value        v
+	segmentedKey string
+	key          string
+	uuid         string
 }
 type segTtl[v comparable] struct {
-	values       []*segTtlValue[v]
-	timer        chan bool
+	values       []*SegValueData[v]
+	stop         chan bool
 	mu           sync.RWMutex
 	last_updated LastUpdated[v]
 }
 
 type Segmap[v comparable] struct {
-	Node           *SegNode[v]
-	Segmenter      Segmenter
-	ttl_controller segTtl[v]
+	Node          *SegNode[v]
+	Segmenter     Segmenter
+	ttlController segTtl[v]
 }
 
 type SegMapGetValue[v comparable] struct {
@@ -103,140 +99,106 @@ func (s *Segmap[v]) CallBack(cb func(map[string][]LastUpdatedMessage[v]), callba
 		for {
 			select {
 			case <-ticker.C:
-				s.ttl_controller.last_updated.mu.Lock()
-				cb(s.ttl_controller.last_updated.Value)
-				if len(s.ttl_controller.last_updated.Value) > 0 {
-					s.ttl_controller.last_updated.Value = make(map[string][]LastUpdatedMessage[v])
+				s.ttlController.last_updated.mu.Lock()
+				cb(s.ttlController.last_updated.Value)
+				if len(s.ttlController.last_updated.Value) > 0 {
+					s.ttlController.last_updated.Value = make(map[string][]LastUpdatedMessage[v])
 				}
-				s.ttl_controller.last_updated.mu.Unlock()
+				s.ttlController.last_updated.mu.Unlock()
 			}
 		}
 	}()
 }
 
-func (s *Segmap[v]) delete(full_key, segmented_key string, value v, parent, child *SegNode[v], uuid string) {
+func (s *Segmap[v]) delete(full_key, segmentedKey string, value v, parent, child *SegNode[v], uuid string) {
 	child.mu.Lock()
 	child.values.Delete(uuid)
 	child.mu.Unlock()
 	if child.values.Count() == 0 {
 		parent.mu.Lock()
-		parent.Children.Delete(segmented_key)
+		parent.Children.Delete(segmentedKey)
 		parent.mu.Unlock()
 	}
-	s.ttl_controller.last_updated.mu.Lock()
-	s.ttl_controller.last_updated.Value[full_key] = append(s.ttl_controller.last_updated.Value[full_key], LastUpdatedMessage[v]{
+	s.ttlController.last_updated.mu.Lock()
+	s.ttlController.last_updated.Value[full_key] = append(s.ttlController.last_updated.Value[full_key], LastUpdatedMessage[v]{
 		Value: value,
 		Uuid:  uuid,
 	})
-	s.ttl_controller.last_updated.mu.Unlock()
+	s.ttlController.last_updated.mu.Unlock()
 }
 
-func (s *Segmap[v]) new_timer_for_ttl(wait_till time.Time, full_key, uuid string, value v) {
-	s.ttl_controller.timer = make(chan bool)
-	go func() {
-		select {
-		case <-time.After(time.Until(wait_till)):
-			s.ttl_controller.last_updated.mu.Lock()
-			s.ttl_controller.last_updated.Value[full_key] = append(s.ttl_controller.last_updated.Value[full_key], LastUpdatedMessage[v]{
-				Value: value,
-				Uuid:  uuid,
-			})
-			s.ttl_controller.last_updated.mu.Unlock()
-			s.ttl_controller.mu.Lock()
-			s.ttl_controller.values = s.ttl_controller.values[1:]
-			s.ttl_controller.mu.Unlock()
-			close(s.ttl_controller.timer)
-		case <-s.ttl_controller.timer:
-			return
-		}
-		if len(s.ttl_controller.values) > 0 {
-			s.new_timer_for_ttl(s.ttl_controller.values[0].till, s.ttl_controller.values[0].key, s.ttl_controller.values[0].uuid, s.ttl_controller.values[0].value)
-		}
-	}()
-
-}
-
-func (s *Segmap[v]) add_to_ttl(ttl *segTtlValue[v]) int {
-
-	defer s.ttl_controller.mu.RUnlock()
-	low := 0
-	s.ttl_controller.mu.RLock()
-
-	high := len(s.ttl_controller.values) - 1
-
-	for low <= high {
-		mid_index := (low + high) / 2
-		comp_value := s.ttl_controller.values[mid_index].till.Sub(ttl.till)
-
-		if comp_value < 0 {
-			return mid_index
-		} else if comp_value > 0 {
-			low = mid_index + 1
-		} else {
-			high = mid_index + 1
-		}
-	}
-	return low
-}
-
-func (s *Segmap[v]) ttl_maker(full_key, segmented_key, uuid string, till time.Time, value v) *segTtlValue[v] {
-	ttl := &segTtlValue[v]{
-		key:           full_key,
-		value:         value,
-		segmented_key: segmented_key,
-		uuid:          uuid,
-		till:          till,
-	}
-
-	go func() {
-		index := s.add_to_ttl(ttl)
-		s.ttl_controller.mu.Lock()
-		defer s.ttl_controller.mu.Unlock()
-		s.ttl_controller.values = append(s.ttl_controller.values, nil)
-		copy(s.ttl_controller.values[index+1:], s.ttl_controller.values[index:])
-		s.ttl_controller.values[index] = ttl
-		if index == 0 {
-			if s.ttl_controller.timer != nil {
-				close(s.ttl_controller.timer)
+func (s *Segmap[v]) startTTLTimer() {
+	for {
+		if len(s.ttlController.values) > 0 {
+			s.ttlController.stop = make(chan bool)
+			fmt.Println("")
+			ttl := s.ttlController.values[0]
+			select {
+			case <-time.After(time.Until(ttl.till)):
+				s.ttlController.last_updated.mu.Lock()
+				s.ttlController.last_updated.Value[ttl.key] = append(s.ttlController.last_updated.Value[ttl.key], LastUpdatedMessage[v]{
+					Value: ttl.value,
+					Uuid:  ttl.uuid,
+				})
+				s.ttlController.last_updated.mu.Unlock()
+				s.ttlController.mu.Lock()
+				s.ttlController.values = s.ttlController.values[1:]
+				s.ttlController.mu.Unlock()
+			case <-s.ttlController.stop:
+				return
 			}
-			s.new_timer_for_ttl(till, full_key, uuid, value)
 		}
-	}()
-
-	return ttl
+	}
 }
 
-func (s *Segmap[v]) NewSegVal(full_key, segmented_key string, ttl time.Duration, value v, parent, child *SegNode[v], uuid string) *SegValue[v] {
-	if ttl > 0 {
-		return &SegValue[v]{
-			ttl:  s.ttl_maker(full_key, segmented_key, uuid, time.Now().Add(ttl), value),
-			done: make(chan struct{}),
-		}
-		// go func() {
-		// 	select {
-		// 	case <-time.After(ttl):
-		// 		close(seg_val.done)
-		// 		s.delete(full_key, segmented_key, value, parent, child, uuid)
-		// 	case <-seg_val.done:
-		// 		s.delete(full_key, segmented_key, value, parent, child, uuid)
-		// 	}
-		// }()
+func (s *Segmap[v]) addToTTL(ttl *SegValueData[v]) int {
+	s.ttlController.mu.RLock()
+	defer s.ttlController.mu.RUnlock()
+
+	index := sort.Search(len(s.ttlController.values), func(i int) bool {
+		return s.ttlController.values[i].till.After(ttl.till)
+	})
+
+	return index
+}
+
+func (s *Segmap[v]) NewSegVal(fullKey, segmentedKey, uuid string, ttl time.Duration, value v) *SegValueData[v] {
+	segValue := &SegValueData[v]{
+		key:          fullKey,
+		value:        value,
+		segmentedKey: segmentedKey,
+		uuid:         uuid,
+		till:         time.Now().Add(ttl),
 	}
 
-	return nil
+	index := s.addToTTL(segValue)
+	s.ttlController.mu.Lock()
+	s.ttlController.values = append(s.ttlController.values, nil)
+	copy(s.ttlController.values[index+1:], s.ttlController.values[index:])
+	s.ttlController.values[index] = segValue
+
+	if index == 0 {
+		if s.ttlController.stop != nil {
+			close(s.ttlController.stop)
+		}
+	}
+
+	s.ttlController.mu.Unlock()
+
+	return segValue
 }
 
 func NewSegNode[v comparable]() *SegNode[v] {
 	return &SegNode[v]{
-		values:   swiss.NewMap[string, *SegValue[v]](42),
+		values:   swiss.NewMap[string, *SegValueData[v]](42),
 		Children: swiss.NewMap[string, *SegNode[v]](42),
 	}
 }
 
 func NewSegmap[v comparable](segmenter Segmenter) *Segmap[v] {
 	s := Segmap[v]{
-		ttl_controller: segTtl[v]{
-			values: []*segTtlValue[v]{},
+		ttlController: segTtl[v]{
+			values: []*SegValueData[v]{},
 			last_updated: LastUpdated[v]{
 				Value: make(map[string][]LastUpdatedMessage[v]),
 			},
@@ -250,17 +212,17 @@ func NewSegmap[v comparable](segmenter Segmenter) *Segmap[v] {
 		s.Segmenter = segmenter
 	}
 
+	go s.startTTLTimer()
+
 	return &s
 }
 
 func (s *Segmap[v]) Put(key string, ttl time.Duration, value ...v) int {
-	var parent *SegNode[v]
 	segnode := s.Node
-	segmented_key := ""
+	segmentedKey := ""
 
 	for seg, i := s.Segmenter(key, 0); seg != ""; seg, i = s.Segmenter(key, i) {
-		parent = segnode
-		segmented_key = seg
+		segmentedKey = seg
 		child, ok := segnode.Children.Get(seg)
 		if !ok {
 			segnode.mu.Lock()
@@ -273,7 +235,7 @@ func (s *Segmap[v]) Put(key string, ttl time.Duration, value ...v) int {
 
 	for _, val := range value {
 		uuid := segnode.GenerateNotUsedUUid(5)
-		segnode.values.Put(uuid, s.NewSegVal(key, segmented_key, ttl, val, parent, segnode, uuid))
+		segnode.values.Put(uuid, s.NewSegVal(key, segmentedKey, uuid, ttl, val))
 	}
 	return segnode.values.Count()
 }
@@ -293,9 +255,9 @@ func (s *Segmap[v]) Get(key string) []SegMapGetValue[v] {
 	segnode.mu.RLock()
 	defer segnode.mu.RUnlock()
 	segval_ret := []SegMapGetValue[v]{}
-	segnode.values.Iter(func(k string, val *SegValue[v]) (stop bool) {
+	segnode.values.Iter(func(k string, val *SegValueData[v]) (stop bool) {
 		segval_ret = append(segval_ret, SegMapGetValue[v]{
-			Value: val.ttl.value,
+			Value: val.value,
 			Uuid:  k,
 		})
 		return false
@@ -318,21 +280,21 @@ func (s *Segmap[v]) Delete(key, uuid string) bool {
 		segnode = child
 	}
 
-	val, ok := segnode.values.Get(uuid)
-	if ok {
+	// val, ok := segnode.values.Get(uuid)
+	// if ok {
 
-		close(val.done)
-	}
+	// 	close(val.done)
+	// }
 
-	return ok
+	return false
 }
 
 func (s *SegNode[v]) walk() []v {
 	if s != nil {
 		var result []v
 		s.mu.RLock()
-		s.values.Iter(func(k string, val *SegValue[v]) (stop bool) {
-			result = append(result, val.ttl.value)
+		s.values.Iter(func(k string, val *SegValueData[v]) (stop bool) {
+			result = append(result, val.value)
 			return false
 		})
 		s.mu.RUnlock()
@@ -353,12 +315,12 @@ func (s *Segmap[v]) Transverse(key string) []v {
 	for seg, i := s.Segmenter(key, 0); seg != ""; seg, i = s.Segmenter(key, i) {
 		segnode.mu.RLock()
 		child, ok := segnode.Children.Get(seg)
+		segnode.mu.RUnlock()
 		if !ok {
-			segnode.mu.RUnlock()
 			return nil
 		}
-		segnode.mu.RUnlock()
 		segnode = child
+		fmt.Println(segnode)
 	}
 	return segnode.walk()
 }
@@ -386,5 +348,5 @@ func main() {
 	fmt.Println(segmap.Get("tuutf e f e"))
 
 	// Transverse is not working needs fix!
-	// fmt.Println(segmap.Transverse("tuutf e f"))
+	fmt.Println(segmap.Transverse("tuutf e f"))
 }
